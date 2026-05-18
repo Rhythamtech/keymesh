@@ -1,0 +1,28 @@
+name: TestPyPI Publish
+
+on:
+  push:
+    branches: [ main ]
+  release:
+    types: [published]
+
+jobs:
+  build-n-publish:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: [actions/checkout@v4](https://github.com)
+    - name: Set up Python
+      uses: [actions/setup-python@v5](https://github.com)
+      with:
+        python-version: "3.x"
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install build twine
+    - name: Build and publish
+      env:
+        TWINE_USERNAME: __token__
+        TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+      run: |
+        python -m build
+        python -m twine upload --repository testpypi dist/*
