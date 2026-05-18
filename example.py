@@ -17,10 +17,8 @@ BASE_URL = os.getenv("OPENAI_BASE_URL","")
 MODEL_NAME = os.getenv("OPENAI_MODEL_NAME","")
 
 # ── 1. Synchronous Example (Thread-safe, Blocking) ──────────────────────────
-def run_sync_example() -> None:
-    print("── Running Synchronous Demo ──")
-    pool = SyncKeyPool(keys=API_KEYS)
-    
+def run_sync_example(pool: SyncKeyPool) -> None:
+    print("── Running Synchronous Demo ──")    
     # Acquire key synchronously
     key = pool.acquire()
     client = OpenAI(base_url=BASE_URL, api_key=key)
@@ -42,9 +40,8 @@ def run_sync_example() -> None:
 
 
 # ── 2. Asynchronous Example (Asyncio-safe) ──────────────────────────────────
-async def run_async_example() -> None:
+async def run_async_example(pool: KeyPool) -> None:
     print("\n── Running Asynchronous Demo ──")
-    pool = KeyPool(keys=API_KEYS)
     
     # Acquire key asynchronously
     key = await pool.acquire()
@@ -67,5 +64,7 @@ async def run_async_example() -> None:
 
 
 if __name__ == "__main__":
-    run_sync_example()
-    asyncio.run(run_async_example())
+    pool = SyncKeyPool(keys=API_KEYS)
+    async_pool = KeyPool(keys=API_KEYS)
+    run_sync_example(pool)
+    asyncio.run(run_async_example(async_pool))
