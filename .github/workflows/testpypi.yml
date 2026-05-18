@@ -3,8 +3,6 @@ name: TestPyPI Publish
 on:
   push:
     branches: [ main ]
-  release:
-    types: [published]
 
 jobs:
   build-n-publish:
@@ -23,10 +21,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install build twine
 
-      - name: Build and publish
+      - name: Clean old builds
+        run: |
+          rm -rf dist build *.egg-info
+
+      - name: Build package
+        run: |
+          python -m build
+
+      - name: Publish to TestPyPI
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
         run: |
-          python -m build
-          python -m twine upload --repository testpypi dist/*
+          python -m twine upload \
+            --repository testpypi \
+            --skip-existing \
+            dist/*
