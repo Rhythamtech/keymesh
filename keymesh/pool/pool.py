@@ -12,7 +12,7 @@ KeyPool is framework-agnostic. It never sends HTTP requests or wraps any SDK.
 
 import asyncio
 import logging
-from typing import Sequence
+from typing import Any, Sequence
 
 from keymesh.exceptions import KeyExhaustedError, NoAvailableKeyError
 from keymesh.metrics.pool_metrics import PoolMetrics
@@ -82,6 +82,7 @@ class KeyPool:
         self._scheduler: BaseScheduler = scheduler or build_scheduler(strategy)
         self._storage: BaseStorage = storage or MemoryStorage()
         self._default_cooldown = default_cooldown
+        self._max_failures = max_failures
         self._acquire_timeout = acquire_timeout
         self._metrics = PoolMetrics()
         self._pool_lock = asyncio.Lock()
@@ -110,18 +111,18 @@ class KeyPool:
         NoAvailableKeyError
             If no key becomes available within `acquire_timeout` seconds.
         """
-        deadline = asyncio.get_event_loop().time() + self._acquire_timeout
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._acquire_timeout
 
         while True:
             key_state = await self._try_acquire()
             if key_state is not None:
-                await key_state.increment_active()
                 self._metrics.record_acquire()
                 logger.debug("Acquired key ...%s", key_state.key[-6:])
                 return key_state.key
 
             self._metrics.record_no_key()
-            remaining = deadline - asyncio.get_event_loop().time()
+            remaining = deadline - loop.time()
             if remaining <= 0:
                 raise NoAvailableKeyError(
                     "No API keys are currently available. "
@@ -174,6 +175,8 @@ class KeyPool:
         Mark a key as rate-limited (HTTP 429).
 
         The key will be excluded from scheduling until the cooldown elapses.
+        Resets the key's consecutive failure counter — a rate-limited key is
+        still valid, just throttled.
 
         Parameters
         ----------
@@ -189,9 +192,26 @@ class KeyPool:
             "Key ...%s rate-limited, cooling down for %.1fs", key[-6:], duration
         )
 
+    async def add_key(self, key: str) -> None:
+        """
+        Add or reset a key in the pool at runtime.
+
+        Use this to:
+        - Re-admit an exhausted key after rotating/refreshing it.
+        - Inject a brand-new key into a running pool without restarting.
+
+        Parameters
+        ----------
+        key:
+            The raw API key string to add or reset.
+        """
+        async with self._pool_lock:
+            self._states[key] = KeyState(key=key, max_failures=self._max_failures)
+        logger.info("Key ...%s added/reset in pool", key[-6:])
+
     # ── Diagnostics ───────────────────────────────────────────────────────────────
 
-    def status(self) -> dict:
+    def status(self) -> dict[str, Any]:
         """Return a full status snapshot of the pool and all key states."""
         return {
             "pool_metrics": self._metrics.snapshot(),
@@ -213,7 +233,10 @@ class KeyPool:
         """
         async with self._pool_lock:
             candidates = [ks for ks in self._states.values() if ks.is_available]
-            return self._scheduler.select(candidates)
+            key_state = self._scheduler.select(candidates)
+            if key_state is not None:
+                await key_state.increment_active()
+            return key_state
 
     def _resolve(self, key: str) -> KeyState:
         """Look up a KeyState by raw key string. Raises KeyError if unknown."""

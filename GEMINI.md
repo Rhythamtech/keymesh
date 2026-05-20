@@ -76,18 +76,23 @@ keymesh/
 ├── metrics/         # Pool-level diagnostic counters and statistics
 │   └── pool_metrics.py
 ├── pool/            # Main KeyPool lifecycle and public API orchestrator
-│   └── pool.py
+│   ├── pool.py      # Async KeyPool implementation
+│   └── sync_pool.py # Synchronous/Threaded KeyPool implementation
 ├── scheduler/       # Pluggable scheduling strategies (Round Robin, Least Busy, Weighted)
 │   ├── base.py
 │   ├── least_busy.py
 │   ├── round_robin.py
 │   └── weighted.py
-├── state/           # Async-safe individual key state representation
-│   └── key_state.py
-├── storage/         # Pluggable persistence backends (Memory, JSON, SQLite, Redis)
-│   ├── base.py
-│   ├── json_storage.py
-│   └── memory.py
+├── state/           # Runtime state representation
+│   ├── key_state.py      # Async-safe individual KeyState
+│   └── sync_key_state.py # Thread-safe individual SyncKeyState
+├── storage/         # Pluggable persistence backends
+│   ├── base.py           # Async storage base
+│   ├── sync_base.py      # Sync storage base
+│   ├── memory.py         # Async MemoryStorage
+│   ├── sync_memory.py    # Sync SyncMemoryStorage
+│   ├── json_storage.py   # Async JSONStorage
+│   └── sync_json.py      # Sync SyncJSONStorage
 └── utils/           # Utilities (logging, masking, helper decorators)
     └── helpers.py
 ```
@@ -115,11 +120,87 @@ Each credential tracks its own runtime diagnostics in an async-safe dataclass:
 
 ---
 
-## 💡 Guidelines for Gemini Tasks
+## 🧬 Concurrency & State Invariants
 
-When modifying or answering questions about KeyMesh, observe the following:
+1. **State Mutation Locks:**
+   - **Async (`KeyState`):** All mutations on `KeyState` must acquire the inner `asyncio.Lock` via `async with self._lock:`.
+   - **Sync (`SyncKeyState`):** All mutations on `SyncKeyState` must acquire the inner `threading.Lock` via `with self._lock:`.
+2. **Stateless Schedulers:** Schedulers (`BaseScheduler` subclasses) are stateless selectors. They must only select a key and **never** mutate any key states directly.
+3. **No Event Loop Blocking:** Do not block the event loop or introduce long sleeps when a key is rate-limited. Schedulers must dynamically skip keys cooling down/exhausted and return another immediately.
+4. **EMA calculations:** Latencies must be smoothed using Exponential Moving Average (EMA) with a default alpha of `0.2`:
+   $$\text{Latency}_{\text{avg}} = \alpha \cdot \text{Latency}_{\text{new}} + (1 - \alpha) \cdot \text{Latency}_{\text{prev}}$$
 
-1. **Maintain Concurrency Safety**: All mutations on `KeyState` must acquire the inner `asyncio.Lock` via `async with self._lock:`.
-2. **Never Sleep During Cooldowns**: Do not block the event loop or introduce long sleeps when a key is rate-limited. Schedulers must dynamically skip keys cooling down and return another immediately.
-3. **Keep Interface Clean**: The public interface of `KeyPool` must only expose `acquire`, `release`, `mark_failed`, and `mark_rate_limited`. Do not introduce framework-specific transport wrappers.
-4. **Leverage local `uv` toolchain**: Package management is handled exclusively via `uv`.
+---
+
+## 🔄 Concurrency-Safe Integration Patterns
+
+When using KeyMesh with SDKs (like OpenAI or Anthropic), **never** recreate the client on every request and **never** mutate `client.api_key` globally (causes race conditions). Use one of these three concurrency-safe patterns:
+
+### Pattern 1: Request-Scoped Client Overrides (`with_options`)
+*Recommended for modern OpenAI SDKs.* Generates a copy of the client configuration pointing to the new key, while sharing the underlying connection pool.
+```python
+# Async
+scoped_client = client.with_options(api_key=key)
+response = await scoped_client.chat.completions.create(...)
+
+# Sync
+scoped_client = client.with_options(api_key=key)
+response = scoped_client.chat.completions.create(...)
+```
+
+### Pattern 2: Per-Request Custom Headers (`extra_headers`)
+Injects the authorization key directly inside the request header without changing client-wide configurations.
+```python
+response = await client.chat.completions.create(
+    model="gpt-4",
+    messages=[{"role": "user", "content": "Query"}],
+    extra_headers={"Authorization": f"Bearer {key}"}
+)
+```
+
+### Pattern 3: Automated Lifecycle Context Managers (`key_lifecycle`)
+Encapsulates acquiring, releasing, timing, and error state tracking into reusable Python context managers to prevent key leaks.
+```python
+@contextlib.asynccontextmanager
+async def key_lifecycle(pool: KeyPool):
+    key = await pool.acquire()
+    start = time.monotonic()
+    try:
+        yield key
+        await pool.release(key, latency=time.monotonic() - start)
+    except Exception:
+        await pool.mark_failed(key)
+        raise
+```
+
+---
+
+## 🛠️ Tooling & Command Cheat Sheet
+
+We use **`uv`** as the default package and project manager.
+
+- **Run Tests:**
+  ```bash
+  uv run pytest
+  ```
+- **Type Checking (Strict mypy):**
+  ```bash
+  uv run mypy .
+  ```
+- **Linting & Formatting:**
+  ```bash
+  uv run ruff check .
+  ```
+- **Local Environment Cache Setup:**
+  ```bash
+  export UV_CACHE_DIR=.uv-cache
+  ```
+
+---
+
+## 💡 Developer / AI Guidelines
+
+- **Clean Interface:** Keep the public interface of `KeyPool` and `SyncKeyPool` clean. Only expose `acquire`, `release`, `mark_failed`, and `mark_rate_limited`. Do not introduce framework-specific transport wrappers.
+- **Strict Typing:** Every function parameter, return value, and class field must be fully typed. Use strict `mypy` style annotations.
+- **Error Propagation:** Do not let internal exceptions leak directly without being wrapped in subclasses of `KeyMeshError`.
+- **Zero Heavy Dependencies:** KeyMesh must remain lightweight. Do not import heavy frameworks (like FastAPI, Flask, or HTTP gateways).

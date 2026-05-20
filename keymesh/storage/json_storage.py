@@ -6,10 +6,11 @@ No external dependencies. Works in environments without SQLite or Redis.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from keymesh.storage.base import BaseStorage
 
@@ -26,11 +27,18 @@ class JSONStorage(BaseStorage):
         self._path = Path(path)
         self._lock = asyncio.Lock()
 
+    def _key_id(self, key: str) -> str:
+        """Derive a stable, non-reversible storage identifier from the raw key."""
+        return hashlib.sha256(key.encode()).hexdigest()[:16]
+
     async def _read(self) -> dict[str, dict[str, Any]]:
         if not self._path.exists():
             return {}
         try:
-            return json.loads(self._path.read_text(encoding="utf-8"))
+            return cast(
+                dict[str, dict[str, Any]],
+                json.loads(self._path.read_text(encoding="utf-8")),
+            )
         except (json.JSONDecodeError, OSError):
             return {}
 
@@ -42,13 +50,13 @@ class JSONStorage(BaseStorage):
     async def save(self, key: str, state: dict[str, Any]) -> None:
         async with self._lock:
             data = await self._read()
-            data[key] = state
+            data[self._key_id(key)] = state  # store under hash, not raw key
             await self._write(data)
 
     async def load(self, key: str) -> dict[str, Any] | None:
         async with self._lock:
             data = await self._read()
-            return data.get(key)
+            return data.get(self._key_id(key))
 
     async def load_all(self) -> dict[str, dict[str, Any]]:
         async with self._lock:
@@ -57,7 +65,7 @@ class JSONStorage(BaseStorage):
     async def delete(self, key: str) -> None:
         async with self._lock:
             data = await self._read()
-            data.pop(key, None)
+            data.pop(self._key_id(key), None)
             await self._write(data)
 
     async def close(self) -> None:

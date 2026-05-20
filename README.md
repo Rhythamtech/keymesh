@@ -39,38 +39,33 @@ pip install keymesh
 
 ## 🚀 Quick Start
 
-KeyMesh stays out of your network stack. You acquire a key, use it with your preferred SDK, and report the outcome.
+KeyMesh stays out of your network stack. You acquire a key, use it with your preferred SDK, and report the outcome. To ensure high-throughput and concurrency safety, initialize a single client and pass the acquired keys dynamically per request.
 
 ### ⚡ Asynchronous Example
 
 ```python
 import asyncio
+import time
 from openai import AsyncOpenAI
 from keymesh import KeyPool, SchedulerStrategy
 
-async def main():
-    # 1. Initialize the pool with multiple keys
-    pool = KeyPool(
-        keys=["sk-key-1", "sk-key-2", "sk-key-3"],
-        strategy=SchedulerStrategy.LEAST_BUSY
-    )
+# 1. Initialize a reusable LLM client once (reuses the TCP connection pool)
+client = AsyncOpenAI()
 
-    # 2. Acquire a credential (non-blocking scheduler selection)
+async def make_request(pool: KeyPool):
+    # 2. Acquire a key from the pool (non-blocking selection)
     key = await pool.acquire()
     
-    # 3. Use the key with the OpenAI client directly
-    client = AsyncOpenAI(api_key=key)
-    
+    start_time = time.monotonic()
     try:
-        start_time = asyncio.get_event_loop().time()
-        response = await client.chat.completions.create(
+        # 3. Create a request-scoped client with the acquired key
+        scoped_client = client.with_options(api_key=key)
+        response = await scoped_client.chat.completions.create(
             model="gpt-4",
             messages=[{"role": "user", "content": "Hello KeyMesh Async!"}]
         )
-        latency = asyncio.get_event_loop().time() - start_time
-        
-        # 4. Release key back to the pool on success
-        await pool.release(key, latency=latency)
+        # 4. Release key back to the pool on success with latency tracking
+        await pool.release(key, latency=time.monotonic() - start_time)
         print(f"Response: {response.choices[0].message.content}")
         
     except Exception as e:
@@ -79,6 +74,16 @@ async def main():
             await pool.mark_rate_limited(key, cooldown=60.0)
         else:
             await pool.mark_failed(key)
+
+async def main():
+    pool = KeyPool(
+        keys=["sk-key-1", "sk-key-2", "sk-key-3"],
+        strategy=SchedulerStrategy.LEAST_BUSY
+    )
+    try:
+        await make_request(pool)
+    finally:
+        await pool.close()
 
 asyncio.run(main())
 ```
@@ -90,29 +95,23 @@ import time
 from openai import OpenAI
 from keymesh import SyncKeyPool, SchedulerStrategy
 
-def main():
-    # 1. Initialize the thread-safe pool
-    pool = SyncKeyPool(
-        keys=["sk-key-1", "sk-key-2", "sk-key-3"],
-        strategy=SchedulerStrategy.LEAST_BUSY
-    )
+# 1. Initialize a reusable LLM client once
+client = OpenAI()
 
-    # 2. Acquire a credential synchronously (blocking/thread-safe)
+def make_request(pool: SyncKeyPool):
+    # 2. Acquire a key synchronously (blocking/thread-safe)
     key = pool.acquire()
     
-    # 3. Use the key with the synchronous OpenAI client directly
-    client = OpenAI(api_key=key)
-    
+    start_time = time.monotonic()
     try:
-        start_time = time.monotonic()
-        response = client.chat.completions.create(
+        # 3. Create a request-scoped client with the acquired key
+        scoped_client = client.with_options(api_key=key)
+        response = scoped_client.chat.completions.create(
             model="gpt-4",
             messages=[{"role": "user", "content": "Hello KeyMesh Sync!"}]
         )
-        latency = time.monotonic() - start_time
-        
-        # 4. Release key back to the pool on success
-        pool.release(key, latency=latency)
+        # 4. Release key back to the pool on success with latency tracking
+        pool.release(key, latency=time.monotonic() - start_time)
         print(f"Response: {response.choices[0].message.content}")
         
     except Exception as e:
@@ -122,7 +121,74 @@ def main():
         else:
             pool.mark_failed(key)
 
+def main():
+    pool = SyncKeyPool(
+        keys=["sk-key-1", "sk-key-2", "sk-key-3"],
+        strategy=SchedulerStrategy.LEAST_BUSY
+    )
+    try:
+        make_request(pool)
+    finally:
+        pool.close()
+
 main()
+```
+
+---
+
+## 🔑 Key Management Integration Patterns
+
+When load-balancing API requests concurrently, **never** recreate the client on every request (which destroys the connection pool) and **never** mutate `client.api_key = key` globally (which causes race conditions across concurrent tasks).
+
+Instead, use one of these three concurrency-safe patterns:
+
+### Pattern 1: Request-Scoped Client Overrides (`with_options`)
+*Recommended for modern OpenAI SDKs.* Generates a copy of the client config pointing to the new key, while sharing the underlying connection pool.
+
+```python
+# Async
+scoped_client = client.with_options(api_key=key)
+response = await scoped_client.chat.completions.create(...)
+
+# Sync
+scoped_client = client.with_options(api_key=key)
+response = scoped_client.chat.completions.create(...)
+```
+
+### Pattern 2: Per-Request Custom Headers (`extra_headers`)
+Injects the authorization key directly inside the request header without changing client-wide configurations.
+
+```python
+# Async & Sync
+response = await client.chat.completions.create(
+    model="gpt-4",
+    messages=[{"role": "user", "content": "Query"}],
+    extra_headers={"Authorization": f"Bearer {key}"}
+)
+```
+
+### Pattern 3: Automated Lifecycle Context Managers
+Encapsulates acquiring, releasing, timing, and error state tracking into reusable Python context managers to prevent key leaks.
+
+```python
+import time
+import contextlib
+
+@contextlib.asynccontextmanager
+async def key_lifecycle(pool: KeyPool):
+    key = await pool.acquire()
+    start = time.monotonic()
+    try:
+        yield key
+        await pool.release(key, latency=time.monotonic() - start)
+    except Exception:
+        await pool.mark_failed(key)
+        raise
+
+# Usage
+async with key_lifecycle(pool) as key:
+    scoped_client = client.with_options(api_key=key)
+    response = await scoped_client.chat.completions.create(...)
 ```
 
 ---

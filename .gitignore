@@ -12,5 +12,11 @@ wheels/
 plan.md
 instructions.md
 flow.md
-prompt.md
 github/*
+problem.md
+prompt.md
+.gemini/*
+
+.mypy_cache/*
+.pytest_cache/*
+.uv_cache/*

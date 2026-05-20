@@ -33,14 +33,14 @@ def retry_on(
     *exceptions: type[Exception],
     max_retries: int = 3,
     delay: float = 0.5,
-) -> Callable:
+) -> Callable[..., Any]:
     """
     Simple synchronous retry decorator for non-async functions.
 
     For async retry logic, the KeyPool handles it natively.
     """
 
-    def decorator(func: Callable) -> Callable:
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         @wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             last_exc: Exception | None = None

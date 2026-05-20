@@ -8,6 +8,7 @@ All mutations are protected by a threading.Lock for thread safety.
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -113,18 +114,20 @@ class SyncKeyState:
         """
         Put the key into cooldown for `duration` seconds.
 
-        Called on HTTP 429 responses.
+        Called on HTTP 429 responses. Also resets the consecutive failure
+        counter — a rate-limited key is still valid, just throttled.
         """
         with self._lock:
             self.cooldown_until = time.monotonic() + duration
             self.active_requests = max(0, self.active_requests - 1)
+            self.failure_count = 0  # key is still valid — reset consecutive failures
 
     def reset_failures(self) -> None:
         """Reset failure counter (e.g., after cooldown expires)."""
         with self._lock:
             self.failure_count = 0
 
-    def snapshot(self) -> dict:
+    def snapshot(self) -> dict[str, Any]:
         """Return a serialisable point-in-time snapshot of this key's state."""
         return {
             "key_suffix": f"...{self.key[-6:]}",

@@ -13,7 +13,7 @@ SyncKeyPool is thread-safe and blocking.
 import logging
 import threading
 import time
-from typing import Sequence
+from typing import Any, Sequence
 
 from keymesh.exceptions import KeyExhaustedError, NoAvailableKeyError
 from keymesh.metrics.pool_metrics import PoolMetrics
@@ -83,6 +83,7 @@ class SyncKeyPool:
         self._scheduler: BaseScheduler = scheduler or build_scheduler(strategy)
         self._storage: BaseSyncStorage = storage or SyncMemoryStorage()
         self._default_cooldown = default_cooldown
+        self._max_failures = max_failures
         self._acquire_timeout = acquire_timeout
         self._metrics = PoolMetrics()
         self._pool_lock = threading.Lock()
@@ -116,7 +117,6 @@ class SyncKeyPool:
         while True:
             key_state = self._try_acquire()
             if key_state is not None:
-                key_state.increment_active()
                 self._metrics.record_acquire()
                 logger.debug("Acquired key ...%s", key_state.key[-6:])
                 return key_state.key
@@ -175,6 +175,8 @@ class SyncKeyPool:
         Mark a key as rate-limited (HTTP 429).
 
         The key will be excluded from scheduling until the cooldown elapses.
+        Resets the key's consecutive failure counter — a rate-limited key is
+        still valid, just throttled.
 
         Parameters
         ----------
@@ -190,9 +192,26 @@ class SyncKeyPool:
             "Key ...%s rate-limited, cooling down for %.1fs", key[-6:], duration
         )
 
+    def add_key(self, key: str) -> None:
+        """
+        Add or reset a key in the pool at runtime.
+
+        Use this to:
+        - Re-admit an exhausted key after rotating/refreshing it.
+        - Inject a brand-new key into a running pool without restarting.
+
+        Parameters
+        ----------
+        key:
+            The raw API key string to add or reset.
+        """
+        with self._pool_lock:
+            self._states[key] = SyncKeyState(key=key, max_failures=self._max_failures)
+        logger.info("Key ...%s added/reset in pool", key[-6:])
+
     # ── Diagnostics ───────────────────────────────────────────────────────────────
 
-    def status(self) -> dict:
+    def status(self) -> dict[str, Any]:
         """Return a full status snapshot of the pool and all key states."""
         return {
             "pool_metrics": self._metrics.snapshot(),
@@ -216,7 +235,10 @@ class SyncKeyPool:
             candidates = [ks for ks in self._states.values() if ks.is_available]
             # Schedulers are stateless selectors and conform to BaseScheduler,
             # which works on SyncKeyState since it has identical properties/duck-types KeyState.
-            return self._scheduler.select(candidates)  # type: ignore
+            key_state: SyncKeyState | None = self._scheduler.select(candidates)  # type: ignore
+            if key_state is not None:
+                key_state.increment_active()
+            return key_state
 
     def _resolve(self, key: str) -> SyncKeyState:
         """Look up a SyncKeyState by raw key string. Raises KeyError if unknown."""

@@ -40,7 +40,7 @@ class PoolMetrics:
     def uptime_seconds(self) -> float:
         return time.monotonic() - self._started_at
 
-    def snapshot(self) -> dict:
+    def snapshot(self) -> dict[str, object]:
         return {
             "uptime_seconds": round(self.uptime_seconds, 2),
             "total_acquires": self.total_acquires,

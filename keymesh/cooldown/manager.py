@@ -25,8 +25,20 @@ class CooldownManager:
         """
         Immediately apply a cooldown window to a key (synchronous, for internal use).
 
-        Prefer key_state.apply_cooldown() in async context.
+        .. deprecated::
+            This method mutates ``cooldown_until`` directly without acquiring
+            the key's internal ``asyncio.Lock``, making it unsafe under
+            concurrency. Use ``await key_state.apply_cooldown(duration)``
+            in async contexts instead.
         """
+        import warnings
+
+        warnings.warn(
+            "CooldownManager.apply() is not concurrency-safe. "
+            "Use `await key_state.apply_cooldown(duration)` in async code.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         key_state.cooldown_until = time.monotonic() + duration
 
     @staticmethod
