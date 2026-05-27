@@ -1,22 +1,35 @@
 # Python-generated files
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
 
-# Virtual environments
-.venv
+# Virtual environments and package managers
+.venv/
+.uv-cache/
+
+# Environment variables & local configuration
 .env
-plan.md
-instructions.md
-flow.md
-github/*
-problem.md
-prompt.md
-.gemini/*
+.env.*
+!.env.example
 
-.mypy_cache/*
-.pytest_cache/*
-.uv_cache/*
+# IDEs, Editors & OS metadata
+.DS_Store
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Testing & Type checking caches
+.mypy_cache/
+.pytest_cache/
+
+# AI Agent metadata
+.gemini/
+
