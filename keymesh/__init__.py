@@ -29,6 +29,7 @@ from keymesh.exceptions import (
     KeyCooldownError,
     KeyExhaustedError,
 )
+from keymesh.integrations.openai_handler import OpenAIHandler, AsyncOpenAIHandler
 
 __all__ = [
     "KeyPool",
@@ -40,6 +41,8 @@ __all__ = [
     "NoAvailableKeyError",
     "KeyCooldownError",
     "KeyExhaustedError",
+    "OpenAIHandler",
+    "AsyncOpenAIHandler",
 ]
 
 __version__ = "0.1.0"
