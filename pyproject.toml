@@ -1,6 +1,6 @@
 [project]
 name = "keymesh"
-version = "0.1.2a"
+version = "0.1.2c3"
 description = "A lightweight, concurrency-safe credential orchestration runtime for AI API systems."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,16 +23,16 @@ dependencies = [
 [project.optional-dependencies]
 redis = ["redis"]
 openai = [
-    "openai>=1.0.0",
-    "httpx>=0.20.0",
+    "openai",
+    "httpx",
 ]
 dev = [
     "pytest",
     "pytest-asyncio",
     "mypy",
     "ruff",
-    "openai>=1.0.0",
-    "httpx>=0.20.0",
+    "openai",
+    "httpx",
 ]
 
 [project.scripts]

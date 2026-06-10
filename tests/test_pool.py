@@ -2,7 +2,6 @@
 Tests for KeyPool — acquire, release, rate-limiting, and scheduling.
 """
 
-import asyncio
 import pytest
 from keymesh.pool.pool import KeyPool
 from keymesh.scheduler.base import SchedulerStrategy

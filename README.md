@@ -28,12 +28,15 @@ KeyMesh is a high-performance runtime designed to multiplex multiple API keys (e
 KeyMesh is optimized for the [uv](https://github.com/astral-sh/uv) package manager.
 
 ```bash
-# Using uv
+# Core package
 uv add keymesh
-
-# Standard pip
 pip install keymesh
+
+# With OpenAI SDK integration support
+uv add keymesh --optional openai
+pip install keymesh[openai]
 ```
+
 
 ---
 
@@ -140,9 +143,39 @@ main()
 
 When load-balancing API requests concurrently, **never** recreate the client on every request (which destroys the connection pool) and **never** mutate `client.api_key = key` globally (which causes race conditions across concurrent tasks).
 
-Instead, use one of these three concurrency-safe patterns:
+Instead, use one of these concurrency-safe patterns:
 
-### Pattern 1: Request-Scoped Client Overrides (`with_options`)
+### Pattern 1: Transparent HTTP Client Handlers (Recommended 🚀)
+Pass the integration handler directly as the `http_client` parameter in the OpenAI SDK. KeyMesh will transparently acquire, release, rate-limit (detecting 429 and Retry-After), and track failure statistics under the hood without changing how you call the SDK.
+
+```python
+# Async Example
+from openai import AsyncOpenAI
+from keymesh import AsyncOpenAIHandler, SchedulerStrategy
+
+handler = AsyncOpenAIHandler(
+    keys=["sk-1", "sk-2", "sk-3"],
+    strategy=SchedulerStrategy.ROUND_ROBIN,
+)
+client = AsyncOpenAI(api_key="dummy", http_client=handler)
+
+# Use standard OpenAI SDK calls. KeyMesh operates completely transparently!
+response = await client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+
+# Sync Example
+from openai import OpenAI
+from keymesh import OpenAIHandler
+
+handler = OpenAIHandler(keys=["sk-1", "sk-2", "sk-3"])
+client = OpenAI(api_key="dummy", http_client=handler)
+response = client.chat.completions.create(...)
+```
+
+### Pattern 2: Request-Scoped Client Overrides (`with_options`)
+
 *Recommended for modern OpenAI SDKs.* Generates a copy of the client config pointing to the new key, while sharing the underlying connection pool.
 
 ```python
@@ -155,7 +188,7 @@ scoped_client = client.with_options(api_key=key)
 response = scoped_client.chat.completions.create(...)
 ```
 
-### Pattern 2: Per-Request Custom Headers (`extra_headers`)
+### Pattern 3: Per-Request Custom Headers (`extra_headers`)
 Injects the authorization key directly inside the request header without changing client-wide configurations.
 
 ```python
@@ -167,7 +200,7 @@ response = await client.chat.completions.create(
 )
 ```
 
-### Pattern 3: Automated Lifecycle Context Managers
+### Pattern 4: Automated Lifecycle Context Managers
 Encapsulates acquiring, releasing, timing, and error state tracking into reusable Python context managers to prevent key leaks.
 
 ```python

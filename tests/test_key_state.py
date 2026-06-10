@@ -2,7 +2,6 @@
 Tests for KeyState runtime state tracking.
 """
 
-import asyncio
 import time
 import pytest
 from keymesh.state.key_state import KeyState
