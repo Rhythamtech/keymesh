@@ -6,20 +6,20 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Tool: uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 
-KeyMesh is a high-performance runtime designed to multiplex multiple API keys (e.g., OpenAI, Anthropic, Gemini) across highly concurrent workloads. It maximizes aggregate throughput by managing rate limits, cooldowns, and scheduling strategies without being tied to any specific LLM provider or SDK.
+KeyMesh is a high-performance, framework-agnostic runtime designed to multiplex multiple API keys (e.g., OpenAI, Anthropic, Gemini) across highly concurrent workloads. It maximizes aggregate throughput by managing rate limits, cooldowns, and scheduling strategies—acting purely as a routing scheduler and cooldown manager.
 
 ---
 
 ## ✨ Features
 
-- **🚀 Maximized Throughput:** Pool multiple lower-tier keys to behave as a single high-tier endpoint.
+- **🚀 Maximized Throughput:** Pool multiple lower-tier keys to act as a single high-throughput endpoint.
 - **🛡️ Concurrency Safe:** Native `asyncio` and multi-threaded synchronous support with granular locks for high-frequency safe acquisition.
 - **🔌 Sync & Async Native:** Identical features available in both async-first runtimes and standard synchronous/threaded architectures.
 - **🔄 Pluggable Schedulers:** Choose between `RoundRobin`, `LeastBusy`, or `Weighted` strategies.
-- **❄️ Smart Cooldowns:** Automatically skips rate-limited keys and reintroduces them after a configurable backoff.
-- **📊 Health Monitoring:** Tracks latency (EMA), success rates, and consecutive failures to prune dead credentials.
+- **❄️ Smart Cooldowns:** Automatically detects rate limits (`HTTP 429`), parses `Retry-After` headers, and temporarily cools down keys.
+- **📊 Health Monitoring:** Tracks latency using Exponential Moving Average (EMA), success rates, and consecutive failures to prune dead credentials.
 - **💾 Flexible Storage:** Memory and JSON persistent backends for both async (`MemoryStorage`, `JSONStorage`) and sync (`SyncMemoryStorage`, `SyncJSONStorage`) runtimes.
-- **🔌 Framework Agnostic:** Zero dependencies on `openai` or `anthropic` SDKs. Use it with any HTTP client.
+- **🔌 Zero Heavy Couplings:** No hard runtime dependencies on specific client SDKs. Integrates natively via HTTP client adapters.
 
 ---
 
@@ -37,171 +37,136 @@ uv add keymesh --optional openai
 pip install keymesh[openai]
 ```
 
-
 ---
 
-## 🚀 Quick Start
+## 🚀 Recommended Approach: Transparent HTTP Client Handlers
 
-KeyMesh stays out of your network stack. You acquire a key, use it with your preferred SDK, and report the outcome. To ensure high-throughput and concurrency safety, initialize a single client and pass the acquired keys dynamically per request.
+The easiest, most robust way to integrate KeyMesh with the OpenAI SDK is using the built-in [OpenAIHandler](file:///Users/rhythamnegi/Code/keymesh/keymesh/integrations/openai_handler.py) and [AsyncOpenAIHandler](file:///Users/rhythamnegi/Code/keymesh/keymesh/integrations/openai_handler.py). 
 
-### ⚡ Asynchronous Example
+These handlers subclass `httpx.Client` and `httpx.AsyncClient` respectively. When passed directly into the OpenAI SDK client constructor as the `http_client`, they intercept outgoing requests transparently to:
+1. **Acquire** a key from the pool automatically before the request starts.
+2. **Inject** the key dynamically into the request's `Authorization` header.
+3. **Measure** the latency of the request and record it on the key's stats upon success.
+4. **Cool down** the key if the server returns `HTTP 429` (automatically parsing the `Retry-After` header if present).
+5. **Prune / Mark Failed** the key if connection errors or exceptions occur during transmission.
+
+> [!IMPORTANT]
+> This approach keeps your code clean. You do not need to call `pool.acquire()`, `pool.release()`, or handle try/except blocks around key status updates manually. KeyMesh manages everything at the HTTP transport layer!
+
+### ⚡ Asynchronous Integration (Recommended)
 
 ```python
 import asyncio
-import time
 from openai import AsyncOpenAI
-from keymesh import KeyPool, SchedulerStrategy
-
-# 1. Initialize a reusable LLM client once (reuses the TCP connection pool)
-client = AsyncOpenAI()
-
-async def make_request(pool: KeyPool):
-    # 2. Acquire a key from the pool (non-blocking selection)
-    key = await pool.acquire()
-    
-    start_time = time.monotonic()
-    try:
-        # 3. Create a request-scoped client with the acquired key
-        scoped_client = client.with_options(api_key=key)
-        response = await scoped_client.chat.completions.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": "Hello KeyMesh Async!"}]
-        )
-        # 4. Release key back to the pool on success with latency tracking
-        await pool.release(key, latency=time.monotonic() - start_time)
-        print(f"Response: {response.choices[0].message.content}")
-        
-    except Exception as e:
-        # 5. Handle failures or rate limits
-        if "rate_limit" in str(e).lower():
-            await pool.mark_rate_limited(key, cooldown=60.0)
-        else:
-            await pool.mark_failed(key)
+from keymesh import AsyncOpenAIHandler, SchedulerStrategy
 
 async def main():
-    pool = KeyPool(
+    # 1. Initialize the AsyncOpenAIHandler with your keys
+    handler = AsyncOpenAIHandler(
         keys=["sk-key-1", "sk-key-2", "sk-key-3"],
-        strategy=SchedulerStrategy.LEAST_BUSY
+        strategy=SchedulerStrategy.LEAST_BUSY,
+        default_cooldown=60.0
     )
+
+    # 2. Pass the handler directly as the http_client to AsyncOpenAI
+    client = AsyncOpenAI(
+        api_key="dummy-key",  # The dummy value is overridden dynamically per-request
+        http_client=handler
+    )
+
     try:
-        await make_request(pool)
+        # 3. Call the SDK normally! Key rotation & state management is 100% transparent.
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "Hello KeyMesh Async!"}]
+        )
+        print(f"Response: {response.choices[0].message.content}")
     finally:
-        await pool.close()
+        # 4. Gracefully close the handler to persist metrics/storage
+        await handler.aclose()
 
 asyncio.run(main())
 ```
 
-### 🔌 Synchronous Example (Thread-Safe)
+### 🔌 Synchronous Integration (Thread-Safe)
 
 ```python
-import time
 from openai import OpenAI
-from keymesh import SyncKeyPool, SchedulerStrategy
-
-# 1. Initialize a reusable LLM client once
-client = OpenAI()
-
-def make_request(pool: SyncKeyPool):
-    # 2. Acquire a key synchronously (blocking/thread-safe)
-    key = pool.acquire()
-    
-    start_time = time.monotonic()
-    try:
-        # 3. Create a request-scoped client with the acquired key
-        scoped_client = client.with_options(api_key=key)
-        response = scoped_client.chat.completions.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": "Hello KeyMesh Sync!"}]
-        )
-        # 4. Release key back to the pool on success with latency tracking
-        pool.release(key, latency=time.monotonic() - start_time)
-        print(f"Response: {response.choices[0].message.content}")
-        
-    except Exception as e:
-        # 5. Handle failures or rate limits
-        if "rate_limit" in str(e).lower():
-            pool.mark_rate_limited(key, cooldown=60.0)
-        else:
-            pool.mark_failed(key)
+from keymesh import OpenAIHandler, SchedulerStrategy
 
 def main():
-    pool = SyncKeyPool(
+    # 1. Initialize the thread-safe OpenAIHandler
+    handler = OpenAIHandler(
         keys=["sk-key-1", "sk-key-2", "sk-key-3"],
-        strategy=SchedulerStrategy.LEAST_BUSY
+        strategy=SchedulerStrategy.ROUND_ROBIN
     )
-    try:
-        make_request(pool)
-    finally:
-        pool.close()
 
-main()
+    # 2. Pass the handler directly as the http_client to OpenAI
+    client = OpenAI(
+        api_key="dummy-key",
+        http_client=handler
+    )
+
+    try:
+        # 3. Use the SDK as usual
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "Hello KeyMesh Sync!"}]
+        )
+        print(f"Response: {response.choices[0].message.content}")
+    finally:
+        # 4. Gracefully close the handler
+        handler.close()
+
+if __name__ == "__main__":
+    main()
 ```
 
 ---
 
-## 🔑 Key Management Integration Patterns
+## 💡 Low-Level / Custom Integration Patterns
 
-When load-balancing API requests concurrently, **never** recreate the client on every request (which destroys the connection pool) and **never** mutate `client.api_key = key` globally (which causes race conditions across concurrent tasks).
+If you are using a custom HTTP client, a different LLM SDK (like Anthropic, Gemini, or Cohere), or need manual control over the lifecycle of your credentials, you can interface directly with [KeyPool](file:///Users/rhythamnegi/Code/keymesh/keymesh/pool/pool.py) or [SyncKeyPool](file:///Users/rhythamnegi/Code/keymesh/keymesh/pool/sync_pool.py).
 
-Instead, use one of these concurrency-safe patterns:
+> [!WARNING]
+> **Strict Concurrency Rule:** Never mutate a shared client's API key globally (e.g. `client.api_key = key`) in concurrent loops as it causes race conditions. Instead, use one of the patterns below to scope the key to the request context.
 
-### Pattern 1: Transparent HTTP Client Handlers (Recommended 🚀)
-Pass the integration handler directly as the `http_client` parameter in the OpenAI SDK. KeyMesh will transparently acquire, release, rate-limit (detecting 429 and Retry-After), and track failure statistics under the hood without changing how you call the SDK.
-
-```python
-# Async Example
-from openai import AsyncOpenAI
-from keymesh import AsyncOpenAIHandler, SchedulerStrategy
-
-handler = AsyncOpenAIHandler(
-    keys=["sk-1", "sk-2", "sk-3"],
-    strategy=SchedulerStrategy.ROUND_ROBIN,
-)
-client = AsyncOpenAI(api_key="dummy", http_client=handler)
-
-# Use standard OpenAI SDK calls. KeyMesh operates completely transparently!
-response = await client.chat.completions.create(
-    model="gpt-4o",
-    messages=[{"role": "user", "content": "Hello!"}]
-)
-
-# Sync Example
-from openai import OpenAI
-from keymesh import OpenAIHandler
-
-handler = OpenAIHandler(keys=["sk-1", "sk-2", "sk-3"])
-client = OpenAI(api_key="dummy", http_client=handler)
-response = client.chat.completions.create(...)
-```
-
-### Pattern 2: Request-Scoped Client Overrides (`with_options`)
-
-*Recommended for modern OpenAI SDKs.* Generates a copy of the client config pointing to the new key, while sharing the underlying connection pool.
+### Pattern 1: Request-Scoped Client Overrides (`with_options`)
+Modern SDKs support copying a client configuration with a overridden API key while sharing the underlying connection pool.
 
 ```python
 # Async
-scoped_client = client.with_options(api_key=key)
-response = await scoped_client.chat.completions.create(...)
-
-# Sync
-scoped_client = client.with_options(api_key=key)
-response = scoped_client.chat.completions.create(...)
+key = await pool.acquire()
+start = time.monotonic()
+try:
+    scoped_client = client.with_options(api_key=key)
+    response = await scoped_client.chat.completions.create(...)
+    await pool.release(key, latency=time.monotonic() - start)
+except Exception:
+    await pool.mark_failed(key)
+    raise
 ```
 
-### Pattern 3: Per-Request Custom Headers (`extra_headers`)
-Injects the authorization key directly inside the request header without changing client-wide configurations.
+### Pattern 2: Per-Request Custom Headers (`extra_headers`)
+Pass the key as an HTTP header directly in the API call, bypassing global client state.
 
 ```python
-# Async & Sync
-response = await client.chat.completions.create(
-    model="gpt-4",
-    messages=[{"role": "user", "content": "Query"}],
-    extra_headers={"Authorization": f"Bearer {key}"}
-)
+key = await pool.acquire()
+start = time.monotonic()
+try:
+    response = await client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "Query"}],
+        extra_headers={"Authorization": f"Bearer {key}"}
+    )
+    await pool.release(key, latency=time.monotonic() - start)
+except Exception:
+    await pool.mark_failed(key)
+    raise
 ```
 
-### Pattern 4: Automated Lifecycle Context Managers
-Encapsulates acquiring, releasing, timing, and error state tracking into reusable Python context managers to prevent key leaks.
+### Pattern 3: Context Managers (`key_lifecycle`)
+Encapsulate the acquire/release/fail lifecycle into a clean Python context manager:
 
 ```python
 import time
@@ -230,10 +195,10 @@ async with key_lifecycle(pool) as key:
 
 KeyMesh follows a modular, thread-safe, and async-safe design:
 
-- **KeyPool / SyncKeyPool:** The central async / sync orchestrators.
-- **Scheduler:** Stateless selection logic for choosing the next key (e.g. `RoundRobin`, `LeastBusy`, `Weighted`).
-- **KeyState / SyncKeyState:** Thread-safe runtime metrics tracking per API key.
-- **Storage / BaseSyncStorage:** Pluggable persistence layers (In-Memory or JSON-backed) for both asynchronous and synchronous runtimes.
+- **[KeyPool](file:///Users/rhythamnegi/Code/keymesh/keymesh/pool/pool.py) / [SyncKeyPool](file:///Users/rhythamnegi/Code/keymesh/keymesh/pool/sync_pool.py):** The central async / sync orchestrators.
+- **[Scheduler](file:///Users/rhythamnegi/Code/keymesh/keymesh/scheduler/base.py):** Stateless selection logic for choosing the next key (e.g. `RoundRobin`, `LeastBusy`, `Weighted`).
+- **[KeyState](file:///Users/rhythamnegi/Code/keymesh/keymesh/state/key_state.py) / [SyncKeyState](file:///Users/rhythamnegi/Code/keymesh/keymesh/state/sync_key_state.py):** Lock-guarded runtime diagnostics tracking per API key (failures, latency average, cooldown timers, active requests).
+- **[Storage](file:///Users/rhythamnegi/Code/keymesh/keymesh/storage/base.py):** Pluggable persistence layers (In-Memory or JSON-backed) for both asynchronous and synchronous runtimes.
 
 ---
 
@@ -258,3 +223,4 @@ uv run mypy .
 ## 📄 License
 
 MIT License. See [LICENSE](LICENSE) for details.
+

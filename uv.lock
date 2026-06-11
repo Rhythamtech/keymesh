@@ -233,7 +233,7 @@ wheels = [
 
 [[package]]
 name = "keymesh"
-version = "0.1.2rc4"
+version = "0.1.2b1"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
