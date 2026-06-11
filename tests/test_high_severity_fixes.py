@@ -8,9 +8,7 @@ Tests covering high-severity fixes:
 
 import asyncio
 import hashlib
-import json
 import pytest
-import warnings
 from pathlib import Path
 
 from keymesh.pool.pool import KeyPool
@@ -20,7 +18,6 @@ from keymesh.storage.json_storage import JSONStorage
 from keymesh.storage.sync_json import SyncJSONStorage
 from keymesh.cooldown.manager import CooldownManager
 from keymesh.concurrency.semaphores import SemaphoreGroup
-from keymesh.scheduler.base import SchedulerStrategy
 
 
 @pytest.mark.asyncio
@@ -135,7 +132,7 @@ def test_sync_json_storage_hashes_keys(tmp_path: Path) -> None:
 
 def test_cooldown_manager_deprecation_warning() -> None:
     pool = SyncKeyPool(keys=["k1"])
-    state = pool._resolve("k1")  # retrieve KeyState object via async pool helper or resolve
+    _ = pool._resolve("k1")  # retrieve KeyState object via async pool helper or resolve
     
     # Resolve for KeyPool
     async def get_async_state() -> object:

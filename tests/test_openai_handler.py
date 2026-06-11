@@ -5,7 +5,7 @@ Unit tests for the OpenAI integration handlers.
 import httpx
 import pytest
 from keymesh import OpenAIHandler, AsyncOpenAIHandler, SchedulerStrategy
-from keymesh.exceptions import NoAvailableKeyError, KeyExhaustedError
+from keymesh.exceptions import NoAvailableKeyError
 
 
 def test_sync_openai_handler_success() -> None:

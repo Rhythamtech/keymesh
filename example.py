@@ -9,7 +9,7 @@ import time
 import contextlib
 from typing import Generator, AsyncGenerator
 from dotenv import load_dotenv
-from openai import OpenAI, AsyncOpenAI, OpenAIError, RateLimitError
+from openai import OpenAI, AsyncOpenAI, RateLimitError
 from keymesh import KeyPool, SyncKeyPool
 
 # Load environment variables

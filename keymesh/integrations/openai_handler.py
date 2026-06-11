@@ -35,80 +35,6 @@ def _parse_retry_after(response: httpx.Response) -> float | None:
         return None
 
 
-class SyncKeymeshTransport(httpx.BaseTransport):
-    """
-    Sync Transport wrapping a base transport.
-    
-    Intercepts handle_request to lease a key from the SyncKeyPool, injects it
-    into the Authorization header, tracks latency, and reports failure/rate limits.
-    """
-
-    def __init__(self, base_transport: httpx.BaseTransport, pool: SyncKeyPool) -> None:
-        self._base_transport = base_transport
-        self._pool = pool
-
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
-        key = self._pool.acquire()
-        start = time.monotonic()
-        # Override client-wide key dynamically per request
-        request.headers["Authorization"] = f"Bearer {key}"
-        try:
-            response = self._base_transport.handle_request(request)
-            latency = time.monotonic() - start
-            if response.status_code == 429:
-                cooldown_dur = _parse_retry_after(response) or self._pool._default_cooldown
-                self._pool.mark_rate_limited(key, cooldown=cooldown_dur)
-            else:
-                self._pool.release(key, latency=latency)
-            return response
-        except Exception as exc:
-            try:
-                self._pool.mark_failed(key)
-            except Exception as pool_exc:
-                logger.warning("Error marking key as failed: %s", pool_exc)
-            raise exc
-
-    def close(self) -> None:
-        self._base_transport.close()
-
-
-class AsyncKeymeshTransport(httpx.AsyncBaseTransport):
-    """
-    Async Transport wrapping a base async transport.
-    
-    Intercepts handle_async_request to lease a key from the KeyPool, injects it
-    into the Authorization header, tracks latency, and reports failure/rate limits.
-    """
-
-    def __init__(self, base_transport: httpx.AsyncBaseTransport, pool: KeyPool) -> None:
-        self._base_transport = base_transport
-        self._pool = pool
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        key = await self._pool.acquire()
-        start = time.monotonic()
-        # Override client-wide key dynamically per request
-        request.headers["Authorization"] = f"Bearer {key}"
-        try:
-            response = await self._base_transport.handle_async_request(request)
-            latency = time.monotonic() - start
-            if response.status_code == 429:
-                cooldown_dur = _parse_retry_after(response) or self._pool._default_cooldown
-                await self._pool.mark_rate_limited(key, cooldown=cooldown_dur)
-            else:
-                await self._pool.release(key, latency=latency)
-            return response
-        except Exception as exc:
-            try:
-                await self._pool.mark_failed(key)
-            except Exception as pool_exc:
-                logger.warning("Error marking key as failed: %s", pool_exc)
-            raise exc
-
-    async def aclose(self) -> None:
-        await self._base_transport.aclose()
-
-
 class OpenAIHandler(httpx.Client):
     """
     A custom sync HTTP client that wraps KeyMesh SyncKeyPool scheduling.
@@ -136,14 +62,37 @@ class OpenAIHandler(httpx.Client):
             max_failures=max_failures,
             acquire_timeout=acquire_timeout,
         )
-        base_transport = httpx_kwargs.pop("transport", None) or httpx.HTTPTransport()
-        transport = SyncKeymeshTransport(base_transport, self._pool)
-        super().__init__(transport=transport, **httpx_kwargs)
+        super().__init__(**httpx_kwargs)
 
     @property
     def pool(self) -> SyncKeyPool:
         """The underlying SyncKeyPool instance for diagnostics/management."""
         return self._pool
+
+    def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        """
+        Intercept request to lease a key from the SyncKeyPool, inject it
+        into the Authorization header, track latency, and report failure/rate limits.
+        """
+        key = self._pool.acquire()
+        start = time.monotonic()
+        # Override client-wide key dynamically per request
+        request.headers["Authorization"] = f"Bearer {key}"
+        try:
+            response = super().send(request, **kwargs)
+            latency = time.monotonic() - start
+            if response.status_code == 429:
+                cooldown_dur = _parse_retry_after(response) or self._pool._default_cooldown
+                self._pool.mark_rate_limited(key, cooldown=cooldown_dur)
+            else:
+                self._pool.release(key, latency=latency)
+            return response
+        except Exception as exc:
+            try:
+                self._pool.mark_failed(key)
+            except Exception as pool_exc:
+                logger.warning("Error marking key as failed: %s", pool_exc)
+            raise exc
 
     def close(self) -> None:
         super().close()
@@ -177,14 +126,37 @@ class AsyncOpenAIHandler(httpx.AsyncClient):
             max_failures=max_failures,
             acquire_timeout=acquire_timeout,
         )
-        base_transport = httpx_kwargs.pop("transport", None) or httpx.AsyncHTTPTransport()
-        transport = AsyncKeymeshTransport(base_transport, self._pool)
-        super().__init__(transport=transport, **httpx_kwargs)
+        super().__init__(**httpx_kwargs)
 
     @property
     def pool(self) -> KeyPool:
         """The underlying KeyPool instance for diagnostics/management."""
         return self._pool
+
+    async def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        """
+        Intercept request to lease a key from the KeyPool, inject it
+        into the Authorization header, track latency, and report failure/rate limits.
+        """
+        key = await self._pool.acquire()
+        start = time.monotonic()
+        # Override client-wide key dynamically per request
+        request.headers["Authorization"] = f"Bearer {key}"
+        try:
+            response = await super().send(request, **kwargs)
+            latency = time.monotonic() - start
+            if response.status_code == 429:
+                cooldown_dur = _parse_retry_after(response) or self._pool._default_cooldown
+                await self._pool.mark_rate_limited(key, cooldown=cooldown_dur)
+            else:
+                await self._pool.release(key, latency=latency)
+            return response
+        except Exception as exc:
+            try:
+                await self._pool.mark_failed(key)
+            except Exception as pool_exc:
+                logger.warning("Error marking key as failed: %s", pool_exc)
+            raise exc
 
     async def aclose(self) -> None:
         await super().aclose()
