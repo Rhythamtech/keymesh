@@ -1,6 +1,6 @@
 [project]
 name = "keymesh"
-version = "0.1.2c5"
+version = "0.1.2b1"
 description = "A lightweight, concurrency-safe credential orchestration runtime for AI API systems."
 readme = "README.md"
 requires-python = ">=3.12"
