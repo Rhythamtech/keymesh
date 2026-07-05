@@ -32,16 +32,34 @@ class KeyMeshMemory:
                 last_429_at TIMESTAMP
             )
         """)
+        self.con.execute("CREATE SEQUENCE IF NOT EXISTS key_lease_id_seq START 1")
         self.con.execute("""
             CREATE TABLE IF NOT EXISTS key_lease (
-                id BIGINT GENERATED ALWAYS AS IDENTITY,
+                id BIGINT DEFAULT nextval('key_lease_id_seq'),
                 api_hash VARCHAR NOT NULL,
                 api_key VARCHAR NOT NULL,
                 attempt INTEGER NOT NULL,
                 acquire_at TIMESTAMP NOT NULL,
-                release_at TIMESTAMP NOT NULL
+                release_at TIMESTAMP
             )
         """)
+
+    def _upsert_key_config(self, api_hash: str, api_key: str, rpm: int) -> None:
+        now = datetime.utcnow()
+        existing = self.con.execute(
+            "SELECT api_hash FROM key_config WHERE api_hash = ?", [api_hash]
+        ).fetchone()
+        if existing:
+            self.con.execute("""
+                UPDATE key_config
+                SET api_key = ?, request_per_minute = ?, updated_at = ?
+                WHERE api_hash = ?
+            """, [api_key, rpm, now, api_hash])
+        else:
+            self.con.execute("""
+                INSERT INTO key_config (api_hash, api_key, request_per_minute, is_disable, created_at, updated_at)
+                VALUES (?, ?, ?, FALSE, ?, ?)
+            """, [api_hash, api_key, rpm, now, now])
 
     def _get_all_available_keys(self) -> list[tuple]:
         rows = self.con.execute("""
@@ -77,11 +95,11 @@ class KeyMeshMemory:
 
     def _add_lease(self, api_hash: str, api_key: str, attempt: int, now: datetime):
         self.con.execute("""
-            INSERT INTO key_lease (api_hash, api_key, attempt, acquire_at, release_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, [api_hash, api_key, attempt, now, now])
+            INSERT INTO key_lease (api_hash, api_key, attempt, acquire_at)
+            VALUES (?, ?, ?, ?)
+        """, [api_hash, api_key, attempt, now])
 
-    def _reset_window_if_needed(self, api_hash: str, now: datetime):
+    def _reset_window_if_needed(self, api_hash: str, now: datetime, window_seconds: int):
         row = self.con.execute("""
             SELECT window_start_at, request_count
             FROM key_state
@@ -95,7 +113,7 @@ class KeyMeshMemory:
         if window_start_at is None:
             return
 
-        if now >= window_start_at + timedelta(seconds=self.window_seconds):
+        if now >= window_start_at + timedelta(seconds=window_seconds):
             self.con.execute("""
                 UPDATE key_state
                 SET window_start_at = ?, request_count = 0
@@ -143,4 +161,35 @@ class KeyMeshMemory:
     def _rollback_transaction(self):
         self.con.execute("ROLLBACK")
 
+    def fetch_db_stats(self):
+        """Fetch database stats for debugging/monitoring."""
+        stats = {}
+        try:
+            # Get number of keys
+            keys_count = self.con.execute("SELECT COUNT(*) FROM key_config").fetchone()[0]
+            stats['total_keys'] = keys_count
+
+            # Get number of active leases (where release_at is NULL)
+            active_leases = self.con.execute("SELECT COUNT(*) FROM key_lease WHERE release_at IS NULL").fetchone()[0]
+            stats['active_leases'] = active_leases
+
+            # Get number of keys in cooldown
+            cooldown_keys = self.con.execute("SELECT COUNT(*) FROM key_state WHERE cooldown_until IS NOT NULL").fetchone()[0]
+            stats['keys_in_cooldown'] = cooldown_keys
+
+            # Get total leases ever
+            total_leases = self.con.execute("SELECT COUNT(*) FROM key_lease").fetchone()[0]
+            stats['total_leases'] = total_leases
+
+            # Get last lease time
+            last_lease = self.con.execute("SELECT MAX(acquire_at) FROM key_lease").fetchone()[0]
+            stats['last_lease_time'] = last_lease
+        except Exception as e:
+            stats['error'] = str(e)
+
+        return stats
     
+
+if __name__ == "__main__":
+    memory = KeyMeshMemory()
+    print(memory.fetch_db_stats())

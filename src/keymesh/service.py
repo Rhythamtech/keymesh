@@ -1,6 +1,6 @@
-from keymesh.model import KeyLease
+from .model import KeyLease
 from datetime import timedelta, datetime
-from keymesh.memory import KeyMeshMemory
+from .memory import KeyMeshMemory
 
 class KeyMeshService :
     def __init__(self, memory : KeyMeshMemory, window_seconds : int):
@@ -16,17 +16,18 @@ class KeyMeshService :
             candidates = []
             for row in rows:
                 api_hash, api_key, rpm, is_disable, window_start_at, last_used_at, request_count, cooldown_until, last_429_at = row
+                
                 if cooldown_until and cooldown_until > now:
                     continue
 
                 if request_count is None:
                     request_count = 0
 
+                if window_start_at and now >= window_start_at + timedelta(seconds=self.window_seconds):
+                    self.memory._reset_window_if_needed(api_hash=api_hash, now=now, window_seconds=self.window_seconds)
+                
                 if request_count is not None and request_count >= rpm:
                     continue
-                
-                if window_start_at and now >= window_start_at + timedelta(seconds=self.window_seconds):
-                    self.memory._reset_window_if_needed(api_hash=api_hash, now = now)
 
                 candidates.append({
                     "api_hash": api_hash,
@@ -70,6 +71,16 @@ class KeyMeshService :
         self.memory._begin_transaction()
         try:
             self.memory._release_key(api_hash = api_hash, now = now)
+            self.memory._commit_transaction()
+        except Exception:
+            self.memory._rollback_transaction()
+            raise
+
+    def set_cooldown(self, api_hash: str) -> None:
+        now = datetime.utcnow()
+        self.memory._begin_transaction()
+        try:
+            self.memory._set_cooldown(api_hash=api_hash, now=now)
             self.memory._commit_transaction()
         except Exception:
             self.memory._rollback_transaction()
