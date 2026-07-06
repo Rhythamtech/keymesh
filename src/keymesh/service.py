@@ -1,14 +1,14 @@
+from typing import Any
 from .model import KeyLease
-from datetime import timedelta, datetime
-from .memory import KeyMeshMemory
+from datetime import timedelta, datetime, UTC
 
 class KeyMeshService :
-    def __init__(self, memory : KeyMeshMemory, window_seconds : int):
+    def __init__(self, memory: Any, window_seconds: int):
         self.memory = memory
         self.window_seconds = window_seconds
     
     def acquire(self) -> KeyLease:
-        now = datetime.utcnow()
+        now = datetime.now(UTC).replace(tzinfo=None)
         self.memory._begin_transaction()
         try:
             rows = self.memory._get_all_available_keys()
@@ -67,7 +67,7 @@ class KeyMeshService :
             raise
 
     def release(self, api_hash: str) -> None:
-        now = datetime.utcnow()
+        now = datetime.now(UTC).replace(tzinfo=None)
         self.memory._begin_transaction()
         try:
             self.memory._release_key(api_hash = api_hash, now = now)
@@ -77,7 +77,7 @@ class KeyMeshService :
             raise
 
     def set_cooldown(self, api_hash: str) -> None:
-        now = datetime.utcnow()
+        now = datetime.now(UTC).replace(tzinfo=None)
         self.memory._begin_transaction()
         try:
             self.memory._set_cooldown(api_hash=api_hash, now=now)

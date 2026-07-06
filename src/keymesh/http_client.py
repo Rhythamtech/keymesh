@@ -3,7 +3,7 @@ import httpx
 from typing import Any
 
 from .masking import hash_api_key
-from .memory import KeyMeshMemory
+from .sqlite.memory import SqliteMemory
 from .service import KeyMeshService
 from .logging import KeyMeshLogger
 
@@ -28,7 +28,8 @@ class KeyMeshSyncHTTPClient(httpx.Client):
     def __init__(
         self,
         keys: list[str],
-        db_path: str = "keymesh.db",
+        memory: Any | None = None,
+        db_path: str = ":keymesh:",
         max_retries_per_request: int = 3,
         cooldown_seconds: float = 60.0,
         window_seconds: int = 60,
@@ -44,7 +45,10 @@ class KeyMeshSyncHTTPClient(httpx.Client):
         self._logger = KeyMeshLogger(enabled=debug_logging)
 
         # Initialise database and seed every key from the pool.
-        self._memory = KeyMeshMemory(db_path=db_path)
+        if memory is not None:
+            self._memory = memory
+        else:
+            self._memory = SqliteMemory(db_path=db_path)
         for api_key in keys:
             api_hash = hash_api_key(api_key)
             self._memory._upsert_key_config(
