@@ -229,9 +229,3 @@ class SqliteMemory:
 
         return stats
 
-# Alias for backward compatibility / fixing typo
-SqliteMemmory = SqliteMemory
-
-if __name__ == "__main__":
-    memory = SqliteMemory()
-    print(memory.fetch_db_stats())

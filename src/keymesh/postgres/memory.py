@@ -258,4 +258,3 @@ class PostgresMemory:
         except Exception:
             pass
 
-PostgresMemmory = PostgresMemory

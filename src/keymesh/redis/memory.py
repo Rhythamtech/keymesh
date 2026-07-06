@@ -217,4 +217,3 @@ class RedisMemory:
         if keys:
             self.redis.delete(*keys)
 
-RedisMemmory = RedisMemory
